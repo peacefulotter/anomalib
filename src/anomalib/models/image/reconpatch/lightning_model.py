@@ -14,9 +14,11 @@ import torch
 from torchvision.transforms.v2 import CenterCrop, Compose, Normalize, Resize, Transform
 
 from anomalib import LearningType
-from anomalib.models.components import AnomalyModule, MemoryBankMixin
+from anomalib.models.components import AnomalyModule
 
-from .torch_model import PatchcoreModel
+from .torch_model import ReconpatchModel
+
+from adamp import AdamP
 
 logger = logging.getLogger(__name__)
 
@@ -44,25 +46,22 @@ class Reconpatch(AnomalyModule):
         pre_trained: bool = True,
         coreset_sampling_ratio: float = 0.1,
         num_neighbors: int = 9,
+        lr=0.05,
     ) -> None:
         super().__init__()
 
-        self.patchcore: PatchcoreModel = PatchcoreModel(
+        # TODO: requires Patchcore Lightning module?
+        self.model: ReconpatchModel = ReconpatchModel(
             backbone=backbone,
             pre_trained=pre_trained,
             layers=layers,
             num_neighbors=num_neighbors,
         )
-        self.coreset_sampling_ratio = coreset_sampling_ratio
-        self.embeddings: list[torch.Tensor] = []
+        self.lr = lr
 
     def configure_optimizers(self) -> None:
-        """Configure optimizers.
-
-        Returns:
-            None: Do not set optimizers by returning None.
-        """
-        return
+        optimizer = AdamP(self.parameters(), lr=self.lr)
+        return optimizer
 
     def training_step(
         self, batch: dict[str, str | torch.Tensor], *args, **kwargs
@@ -107,18 +106,13 @@ class Reconpatch(AnomalyModule):
         del args, kwargs
 
         # Get anomaly maps and predicted scores from the model.
-        output = self.model(batch["image"])
+        output = self.patchcore(batch["image"])
 
         # Add anomaly maps and predicted scores to the batch.
         batch["anomaly_maps"] = output["anomaly_map"]
         batch["pred_scores"] = output["pred_score"]
 
         return batch
-
-    @property
-    def trainer_arguments(self) -> dict[str, Any]:
-        """Return Patchcore trainer arguments."""
-        return {"gradient_clip_val": 0, "max_epochs": 1, "num_sanity_val_steps": 0}
 
     @property
     def learning_type(self) -> LearningType:
