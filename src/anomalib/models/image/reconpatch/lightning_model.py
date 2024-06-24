@@ -1,30 +1,34 @@
-"""Towards Total Recall in Industrial Anomaly Detection.
+"""ReConPatch : Contrastive Patch Representation Learning for Industrial Anomaly Detection.
 
-Paper https://arxiv.org/abs/2106.08265.
+Paper https://arxiv.org/abs/2305.16713.
 """
 
-# Copyright (C) 2022-2024 Intel Corporation
-# SPDX-License-Identifier: Apache-2.0
-
-import logging
-from collections.abc import Sequence
-from typing import Any
-
 import torch
+import logging
+
+from adamp import AdamP
+from collections.abc import Sequence
+from torch.optim.optimizer import Optimizer
+from lightning.pytorch.utilities.types import STEP_OUTPUT
 from torchvision.transforms.v2 import CenterCrop, Compose, Normalize, Resize, Transform
 
 from anomalib import LearningType
 from anomalib.models.components import AnomalyModule
 
-from .torch_model import ReconpatchModel
+from .torch_model import ReconpatchMode, ReconpatchModel
 
-from adamp import AdamP
 
 logger = logging.getLogger(__name__)
 
 
 class Reconpatch(AnomalyModule):
     """ReconpatchLightning Module to train ReCOnPatch algorithm.
+
+    >>> model = Reconpatch()
+    >>> trainer.fit(model, datamodule) # Training for N epochs
+    >>> model.model.mode = ReconpatchMode.COLLECTING
+    >>> trainer.fit(model, datamodule) # Collecting embeddings on 1 epoch
+    >>> model.fit() # Creating memory bank
 
     Args:
         backbone (str): Backbone CNN network
@@ -33,8 +37,6 @@ class Reconpatch(AnomalyModule):
             Defaults to ``["layer2", "layer3"]``.
         pre_trained (bool, optional): Boolean to check whether to use a pre_trained backbone.
             Defaults to ``True``.
-        coreset_sampling_ratio (float, optional): Coreset sampling ratio to subsample embedding.
-            Defaults to ``0.1``.
         num_neighbors (int, optional): Number of nearest neighbors.
             Defaults to ``9``.
     """
@@ -44,13 +46,11 @@ class Reconpatch(AnomalyModule):
         backbone: str = "wide_resnet50_2",
         layers: Sequence[str] = ("layer2", "layer3"),
         pre_trained: bool = True,
-        coreset_sampling_ratio: float = 0.1,
         num_neighbors: int = 9,
         lr=0.05,
     ) -> None:
         super().__init__()
 
-        # TODO: requires Patchcore Lightning module?
         self.model: ReconpatchModel = ReconpatchModel(
             backbone=backbone,
             pre_trained=pre_trained,
@@ -58,14 +58,15 @@ class Reconpatch(AnomalyModule):
             num_neighbors=num_neighbors,
         )
         self.lr = lr
+        self.mode: ReconpatchMode = ReconpatchMode.TRAINING
 
-    def configure_optimizers(self) -> None:
+    def configure_optimizers(self) -> Optimizer:
         optimizer = AdamP(self.parameters(), lr=self.lr)
         return optimizer
 
     def training_step(
         self, batch: dict[str, str | torch.Tensor], *args, **kwargs
-    ) -> None:
+    ) -> torch.Tensor:
         """Generate feature embedding of the batch.
 
         Args:
@@ -78,16 +79,8 @@ class Reconpatch(AnomalyModule):
         """
         del args, kwargs  # These variables are not used.
 
-        embedding = self.model(batch["image"])
-        self.embeddings.append(embedding)
-
-    def fit(self) -> None:
-        """Apply subsampling to the embedding collected from the training set."""
-        logger.info("Aggregating the embedding extracted from the training set.")
-        embeddings = torch.vstack(self.embeddings)
-
-        logger.info("Applying core-set subsampling to get the embedding.")
-        self.model.subsample_embedding(embeddings, self.coreset_sampling_ratio)
+        loss = self.model(batch["image"], self.mode)
+        return loss
 
     def validation_step(
         self, batch: dict[str, str | torch.Tensor], *args, **kwargs
@@ -106,7 +99,7 @@ class Reconpatch(AnomalyModule):
         del args, kwargs
 
         # Get anomaly maps and predicted scores from the model.
-        output = self.patchcore(batch["image"])
+        output = self.model(batch["image"])
 
         # Add anomaly maps and predicted scores to the batch.
         batch["anomaly_maps"] = output["anomaly_map"]
